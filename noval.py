@@ -33,7 +33,7 @@ st.set_page_config(
     page_title="Noval Properties Advisor",
     page_icon="◼",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="auto",  # expanded on desktop, collapsed on phones (an open sidebar would cover the screen)
 )
 
 # ------------------------------
@@ -291,6 +291,64 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Mobile layout – applies only on narrow screens; desktop styling is untouched.
+st.markdown(
+    """
+    <style>
+      @media (max-width: 768px) {
+        html, body, [data-testid="stAppViewContainer"] { overflow-x: hidden; }
+
+        .block-container {
+          padding-top: 3.5rem !important;   /* leave room for the sidebar toggle above the banner */
+          padding-left: 1rem !important;
+          padding-right: 1rem !important;
+          padding-bottom: 6rem !important;
+        }
+
+        /* full-bleed banner regardless of the container padding */
+        .brand-bar {
+          margin: 0 calc(50% - 50vw);
+          width: 100vw;
+          box-sizing: border-box;
+          padding: 0.65rem 1rem;
+          flex-wrap: wrap;
+          gap: 0.15rem 1rem;
+        }
+        .brand-name { font-size: 1.15rem; }
+        .brand-tag { font-size: 0.62rem; letter-spacing: 0.08em; }
+
+        .hero { padding: 1.4rem 0 1rem 0; }
+        .hero-title { font-size: 1.85rem; line-height: 1.12; }
+        .hero-subtitle { font-size: 0.98rem; margin-bottom: 1rem; }
+        .hero-rule { margin-bottom: 1.2rem; }
+
+        .card { margin-bottom: 0.6rem; height: auto; }
+        .card-value { font-size: 1.3rem; }
+
+        .section-title { font-size: 1.2rem; }
+        .section-subtitle { font-size: 0.9rem; }
+        .rule { margin: 1rem 0 1.2rem 0; }
+
+        [data-testid="stChatMessage"] { padding: 0.5rem 0.25rem; }
+        [data-testid="stChatMessage"] [data-testid="stDataFrame"] { max-width: 100%; }
+
+        /* keep the sidebar toggle visible and easy to tap */
+        [data-testid="stExpandSidebarButton"], [data-testid="collapsedControl"] {
+          background: var(--background) !important;
+          border-radius: 50%;
+          box-shadow: 0 1px 4px rgba(5, 28, 44, 0.25);
+        }
+      }
+
+      @media (max-width: 480px) {
+        .hero-title { font-size: 1.6rem; }
+        .brand-tag { display: none; }
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ------------------------------
 # Data layer – the dataset is embedded in the app (source: noval_portfolio.csv).
 # To update it, edit PORTFOLIO_ROWS below. None = not available.
@@ -462,12 +520,17 @@ RANK_METRICS = [
 RANK_GATE = (
     r"\b(rank\w*|sort\w*|order\w*|top|bottom|decreasing|increasing|descending|ascending|"
     r"highest|lowest|largest|smallest|biggest|most|least|cheapest|oldest|newest|best|worst|"
-    r"maximum|minimum|max|min)\b"
+    r"maximum|minimum|max|min|\d+(?:nd|rd|th)|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\b"
 )
 ASC_WORDS = r"\b(increasing|ascending|lowest|smallest|least|cheapest|bottom|worst|fewest|minimum|min|oldest)\b"
 STRONG_DESC = r"\b(decreasing|descending|highest|largest|biggest|maximum|max|newest|greatest)\b"
 NUM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
 _NUM = r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten)"
+ORD_WORDS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
+             "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10}
+_ORD = r"(\d+(?:st|nd|rd|th)|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)"
+_SUPERLATIVE = (r"(?:largest|biggest|smallest|highest|lowest|cheapest|oldest|newest|greatest|"
+                r"most|least|best|worst|top|bottom)")
 DIM_RANK_PATTERNS = {
     "type": r"\b(types?|categories|category)\b",
     "country": r"\bcountr(y|ies)\b",
@@ -515,6 +578,23 @@ def _parse_count(text: str) -> Optional[int]:
         return None
     raw = m.group(1)
     return int(raw) if raw.isdigit() else NUM_WORDS[raw]
+
+
+def ordinal_label(n: int) -> str:
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _parse_ordinal(text: str) -> Optional[int]:
+    """'2nd largest', 'second-smallest', 'the 3rd building by area' -> 2 / 2 / 3 (None if absent)."""
+    m = re.search(rf"\b{_ORD}[\s-]+(?:\w+[\s-]+){{0,2}}?{_SUPERLATIVE}\b", text) or re.search(
+        rf"\b{_ORD}[\s-]+(?:building|property|asset|city|country|type|region|status)\b", text
+    )
+    if not m:
+        return None
+    raw = m.group(1)
+    value = int(re.sub(r"\D", "", raw)) if raw[0].isdigit() else ORD_WORDS[raw]
+    return value if value >= 1 else None
 
 
 def rank_reply(text: str, scoped: pd.DataFrame, scope: str) -> Optional[Reply]:
@@ -566,6 +646,7 @@ def rank_reply(text: str, scoped: pd.DataFrame, scope: str) -> Optional[Reply]:
 
     # --- how many rows
     n = _parse_count(text)
+    ordinal = None if n is not None else _parse_ordinal(text)   # "2nd largest" -> exactly that rank
     explicit_all = re.search(r"\b(rank\w*|sort\w*|order\w*|list|show|decreasing|increasing|descending|ascending)\b", text)
     plural = re.search(r"\b(properties|assets|buildings|cities|countries|types|regions)\b", text)
     top_bottom = re.search(r"\b(top|bottom)\b", text)
@@ -586,6 +667,24 @@ def rank_reply(text: str, scoped: pd.DataFrame, scope: str) -> Optional[Reply]:
         series = series.dropna().sort_values(ascending=asc, kind="stable")
         if series.empty:
             return Reply(f"The dataset has no {label} figures to rank by{scope}.")
+        if ordinal:
+            distinct = list(dict.fromkeys(series.tolist()))
+            plural_dim = DIM_PLURALS[wants_dim].lower()
+            if ordinal > len(distinct):
+                return Reply(f"Only {len(distinct)} distinct values are available across {plural_dim}, "
+                             f"so there is no {ordinal_label(ordinal)} {word}{scope}.")
+            target = distinct[ordinal - 1]
+            hit = series[series == target]
+            names = " and ".join(f"**{x}**" for x in hit.index)
+            val = f"{target:,.0f}" if key is None else fmt_metric(key, target)
+            upto = series[series.isin(distinct[:ordinal])]
+            table = upto.rename(label_col).reset_index().rename(columns={wants_dim: COLUMN_LABELS.get(wants_dim, wants_dim)})
+            table.insert(0, "rank", upto.rank(method="dense", ascending=asc).astype(int).tolist())
+            if len(hit) == 1:
+                msg = f"The {wants_dim} with the {ordinal_label(ordinal)} {word} {label} is {names} ({val}){scope}."
+            else:
+                msg = f"{names} are tied as the {plural_dim} with the {ordinal_label(ordinal)} {word} {label} ({val}){scope}."
+            return Reply(msg, table=table)
         dim_plural = re.search(r"\b(cities|countries|types|regions|statuses)\b", text)
         if n is None:
             n = 5 if top_bottom else (len(series) if explicit_all or dim_plural else 1)
@@ -622,6 +721,31 @@ def rank_reply(text: str, scoped: pd.DataFrame, scope: str) -> Optional[Reply]:
         else:
             n = 1
     note = f" ({excluded} without {label} data excluded.)" if excluded else ""
+
+    if ordinal:
+        distinct = list(dict.fromkeys(ranked[key].tolist()))
+        if ordinal > len(distinct):
+            return Reply(f"Only {len(distinct)} distinct {label} values are available, "
+                         f"so there is no {ordinal_label(ordinal)} {word} building{scope}.")
+        target = distinct[ordinal - 1]
+        hit = ranked[ranked[key] == target]
+        names = " and ".join(f"**{x}**" for x in hit["name"])
+        what = (f"building by GLA" if key == "area_sqm"
+                else "building" if key == "year_built" else label)
+        head = f"the {ordinal_label(ordinal)} {word} {what}"
+        if key == "year_built":
+            tail = f": built {fmt_metric(key, target)}"
+        else:
+            tail = f": {fmt_metric(key, target)}" + (" each" if len(hit) > 1 else "")
+        msg = (f"{names} {'are tied as' if len(hit) > 1 else 'is'} {head}{tail}{scope}.")
+        if ordinal > 1:
+            top_names = " and ".join(f"**{x}**" for x in ranked[ranked[key] == distinct[0]]["name"])
+            msg += f" For reference, the {word} is {top_names} ({fmt_metric(key, distinct[0])})."
+        msg += note
+        upto = ranked[ranked[key].isin(distinct[:ordinal])].copy()
+        upto.insert(0, "rank", upto[key].map({v: i for i, v in enumerate(distinct, 1)}).astype(int))
+        cols = ["rank", "name", key] + [c for c in ["type", "city", "status"] if c in upto and c != key and upto[c].notna().any()]
+        return Reply(msg, table=upto[cols])
 
     if n == 1:
         best = ranked[ranked[key] == ranked[key].iloc[0]]   # keep ties
@@ -1421,9 +1545,9 @@ st.markdown(
     </div>
     <div class="hero">
       <div class="hero-eyebrow">Portfolio intelligence</div>
-      <div class="hero-title">Ask anything about the Noval Properties portfolio.</div>
+      <div class="hero-title">Ask anything about the Noval Properties portfolio</div>
       <div class="hero-subtitle">
-        List buildings, filter by type or location, get totals and charts, and ask about the financial reports and the Board-approved investment policy.
+        Explore portfolio holdings, review financial performance, and consult the investment policy through a single, intuitive interface
       </div>
       <div class="hero-rule"></div>
     </div>
