@@ -1,4 +1,4 @@
-"""Noval Property Advisor – Streamlit app.
+"""Noval Properties Advisor – Streamlit app.
 
 Answers natural-language questions about the Noval Properties portfolio, e.g.
   * "Provide a list of properties of Noval Properties"
@@ -24,12 +24,13 @@ from typing import Optional
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 # ------------------------------
 # Page configuration
 # ------------------------------
 st.set_page_config(
-    page_title="Noval Property Advisor",
+    page_title="Noval Properties Advisor",
     page_icon="◼",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -58,13 +59,27 @@ st.markdown(
         background: var(--background);
       }
 
-      #MainMenu, footer, header {
+      #MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"] {
         visibility: hidden;
+      }
+
+      /* Keep the header (it holds the arrow that re-opens the sidebar), but make it invisible */
+      header[data-testid="stHeader"] {
+        background: transparent !important;
+      }
+
+      [data-testid="stExpandSidebarButton"], [data-testid="collapsedControl"] {
+        visibility: visible !important;
+        z-index: 1000;
+      }
+
+      [data-testid="stExpandSidebarButton"] *, [data-testid="collapsedControl"] * {
+        color: var(--deep-blue) !important;
       }
 
       .block-container {
         padding-top: 0;
-        padding-bottom: 2.5rem;
+        padding-bottom: 6rem;
         max-width: 1240px;
       }
 
@@ -1346,7 +1361,7 @@ def render_message(message: dict) -> None:
 # Session state
 # ------------------------------
 WELCOME = (
-    "Welcome to the **Noval Property Advisor**.\n\n"
+    "Welcome to the **Noval Properties Advisor**.\n\n"
     "Ask about the portfolio, for example: “Provide a list of properties of Noval Properties”, "
     "or about the investment policy, for example: “What are the investment criteria?”. Answers are in English."
 )
@@ -1360,7 +1375,7 @@ if "pending_prompt" not in st.session_state:
 # Sidebar
 # ------------------------------
 with st.sidebar:
-    st.markdown("### Noval Property Advisor")
+    st.markdown("### Noval Properties Advisor")
     st.caption("Portfolio Q&A for the Viohalco digital transformation office.")
 
     st.markdown("#### Conversation")
@@ -1401,7 +1416,7 @@ with st.sidebar:
 st.markdown(
     """
     <div class="brand-bar">
-      <div class="brand-name">Noval Property Advisor</div>
+      <div class="brand-name">Noval Properties Advisor</div>
       <div class="brand-tag">Viohalco · Real estate intelligence</div>
     </div>
     <div class="hero">
@@ -1453,10 +1468,23 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-chat_container = st.container(height=150)
-with chat_container:
-    for message in st.session_state.messages:
-        render_message(message)
+# Answers are rendered directly in the page (no scrolling box); the page itself grows.
+for message in st.session_state.messages:
+    render_message(message)
+
+if st.session_state.pop("scroll_to_end", False):
+    # After a new answer, scroll the page down so the latest reply is in view.
+    components.html(
+        """
+        <script>
+          const doc = window.parent.document;
+          const main = doc.querySelector('section.main') || doc.querySelector('[data-testid="stMain"]')
+                       || doc.querySelector('[data-testid="stAppViewContainer"]');
+          if (main) { setTimeout(() => main.scrollTo({top: main.scrollHeight, behavior: 'smooth'}), 150); }
+        </script>
+        """,
+        height=0,
+    )
 
 pending_prompt = st.session_state.pending_prompt
 st.session_state.pending_prompt = None
@@ -1466,6 +1494,7 @@ if pending_prompt:
     user_prompt = pending_prompt
 
 if user_prompt:
+    st.session_state.scroll_to_end = True
     st.session_state.messages.append({"role": "user", "content": user_prompt})
     reply = generate_reply(user_prompt, portfolio)
     st.session_state.messages.append(
