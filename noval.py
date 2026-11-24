@@ -1,7 +1,7 @@
-"""Noval Properties Advisor – Streamlit app.
+"""Noval Property Advisor – Streamlit app.
 
-Answers natural-language questions about the Noval Properties portfolio, e.g.
-  * "Provide a list of properties of Noval Properties"
+Answers natural-language questions about the Noval Property portfolio, e.g.
+  * "Provide a list of properties of Noval Property"
   * "Show offices in Athens"
   * "What is the total portfolio value?"
   * "Chart value by city"
@@ -14,12 +14,13 @@ Answers natural-language questions about the Noval Properties portfolio, e.g.
 Data: the 16 Noval buildings from `noval_portfolio.csv` are embedded in this file
 (see PORTFOLIO_ROWS). There is no upload feature.
 Policy: the Greek-language Investment Policy (Board-approved 29.07.2026) is embedded as an
-English knowledge base (see POLICY_ENTRIES); policy questions are always answered in English.
+English knowledge base (see POLICY_ENTRIES).
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from html import escape
 from typing import Optional
 
 import pandas as pd
@@ -30,7 +31,7 @@ import streamlit.components.v1 as components
 # Page configuration
 # ------------------------------
 st.set_page_config(
-    page_title="Noval Properties Advisor",
+    page_title="Noval Property Advisor",
     page_icon="◼",
     layout="wide",
     initial_sidebar_state="auto",  # expanded on desktop, collapsed on phones (an open sidebar would cover the screen)
@@ -188,6 +189,26 @@ st.markdown(
         font-size: 0.95rem;
         color: var(--gray);
         margin-bottom: 1rem;
+      }
+
+      .chart-title {
+        font-family: 'Source Serif 4', Georgia, serif;
+        font-size: 1.05rem;
+        font-weight: 700;
+        color: var(--deep-blue);
+        margin: 0.9rem 0 0.3rem 0;
+      }
+
+      .chart-rule {
+        height: 2px;
+        background: var(--deep-blue);
+        margin-bottom: 0.5rem;
+      }
+
+      .chart-source {
+        font-size: 0.72rem;
+        color: var(--gray);
+        margin: 0.1rem 0 0.8rem 0;
       }
 
       .rule {
@@ -445,8 +466,10 @@ def portfolio_metrics(df: pd.DataFrame) -> dict:
 class Reply:
     text: str
     table: Optional[pd.DataFrame] = None
-    chart: Optional[pd.Series] = None
+    chart: Optional[pd.DataFrame | pd.Series] = None
     chart_title: str = ""
+    chart_unit: str = ""      # eur | eur_exact | eps | pct | x | sqm | year | count (drives data labels)
+    chart_source: str = ""
 
 
 def _mentions(text: str, value: str) -> bool:
@@ -541,6 +564,14 @@ DIM_RANK_PATTERNS = {
 
 
 DIM_PLURALS = {"type": "Types", "country": "Countries", "city": "Cities", "region": "Regions", "status": "Statuses"}
+
+
+PORTFOLIO_SOURCE = "Noval Property portfolio dataset"
+
+
+def chart_unit_for(key: Optional[str]) -> str:
+    return {"area_sqm": "sqm", "value_eur": "eur", "annual_income_eur": "eur", "value_per_sqm": "eur_exact",
+            "occupancy_pct": "pct", "yield_pct": "pct", "year_built": "year"}.get(key or "", "count")
 
 
 def with_derived(df: pd.DataFrame) -> pd.DataFrame:
@@ -703,6 +734,7 @@ def rank_reply(text: str, scoped: pd.DataFrame, scope: str) -> Optional[Reply]:
         return Reply(
             f"{DIM_PLURALS[wants_dim]} ranked by **{label}**, {word} first{scope}:",
             table=table, chart=chart, chart_title=f"{label_col} by {wants_dim}",
+            chart_unit=chart_unit_for(key), chart_source=PORTFOLIO_SOURCE,
         )
 
     # ---------- ranking of individual properties ----------
@@ -770,7 +802,8 @@ def rank_reply(text: str, scoped: pd.DataFrame, scope: str) -> Optional[Reply]:
     size = "" if n >= len(ranked) else f" – showing {n} of {len(ranked)}"
     return Reply(
         f"Buildings ranked by **{label}**, {direction}{scope}{size}.{note}",
-        table=top[cols], chart=chart, chart_title=f"{label.capitalize()} by building",
+        table=top[cols], chart=chart, chart_title=f"{label[:1].upper()}{label[1:]} by building",
+        chart_unit=chart_unit_for(key), chart_source=PORTFOLIO_SOURCE,
     )
 
 
@@ -910,7 +943,8 @@ def finance_reply(text: str) -> Optional[Reply]:
                 for k, v in FIN_SEGMENTS.items()]
         chart = pd.Series({k: v[2025] for k, v in FIN_SEGMENTS.items()}).sort_values(ascending=False)
         return Reply("**Investment property by segment (balance sheet, 31 December)**" + src, table=pd.DataFrame(rows),
-                     chart=chart, chart_title="Investment property by segment, 2025 (€)")
+                     chart=chart, chart_title="Investment property by segment, 31 December 2025",
+                     chart_unit="eur", chart_source=f"Noval Property {FIN_LABEL}")
 
     if re.search(r"funds from operations|\bffo\b", text):
         return Reply("**Funds from operations (FY2025 report):** profit after tax excluding fair-value revaluation, sale results, depreciation, "
@@ -951,11 +985,20 @@ def finance_reply(text: str) -> Optional[Reply]:
         return Reply(f"**{first[1]}, {use_years[0]}:** {fin_fmt(first[2], v)}." + src, table=table)
     # trend sentence + chart for a single metric
     avail = {y: v for y, v in first[3].items() if y in use_years and v is not None}
-    chart, title = None, ""
+    chart, title, chart_unit = None, "", first[2]
     msg = f"**{first[1]}**" if len(hit) == 1 else "**Financial figures**"
-    if len(hit) == 1 and len(avail) >= 2 and first[2] in ("eur", "eps"):
-        chart = pd.Series({str(y): v for y, v in avail.items()})
-        title = f"{first[1]} (€)"
+    wants_chart = bool(re.search(r"\b(chart|plot|graph|visuali[sz]e|bars?|diagram)\b", text))
+    if len(hit) == 1 and len(avail) >= 2 and (first[2] in ("eur", "eps") or wants_chart):
+        ys_ = sorted(avail)
+        chart = pd.Series({str(y): avail[y] for y in ys_})
+        title = f"{first[1]}, {ys_[0]}–{ys_[-1]}"
+    elif len(hit) >= 2 and wants_chart:
+        same = [m for m in hit if m[2] == first[2]]
+        ys_ = sorted({y for m in same for y, v in m[3].items() if y in use_years and v is not None})
+        if len(ys_) >= 1:
+            short = lambda lbl: re.sub(r"\s*\(.*?\)", "", lbl)
+            chart = pd.DataFrame({str(y): [m[3].get(y) for m in same] for y in ys_}, index=[short(m[1]) for m in same])
+            title = f"Key financial figures, {ys_[0]}–{ys_[-1]}" if len(ys_) > 1 else f"Key financial figures, {ys_[0]}"
     note = ""
     if len(hit) == 1 and len(avail) >= 2:
         ys = sorted(avail)
@@ -966,7 +1009,8 @@ def finance_reply(text: str) -> Optional[Reply]:
     if first[0] == "profit":
         note += ("\n\n_Profit includes non-cash fair-value revaluation gains (2025: €20.2M; 2024: €24.5M). "
                 "Excluding fair-value, sale, depreciation, impairment and financial-income effects, profit was €18.3M in 2025 vs €10.9M in 2024._")
-    return Reply(msg + note + src, table=table, chart=chart, chart_title=title)
+    return Reply(msg + note + src, table=table, chart=chart, chart_title=title,
+                 chart_unit=chart_unit, chart_source=f"Noval Property {FIN_LABEL}")
 
 
 # ------------------------------
@@ -974,7 +1018,7 @@ def finance_reply(text: str) -> Optional[Reply]:
 # Source: «Επενδυτική Πολιτική» of NOVAL PROPERTY REIC (Greek original), version 1,
 # approved by the Board of Directors on 29.07.2026. The content below is an English
 # translation/summary of that document, organised by topic; section numbers refer to
-# the original. Answers are always given in English.
+# the original.
 # ------------------------------
 POLICY_LABEL = "Investment Policy v1 (Board-approved 29.07.2026)"
 POLICY_SUMMARY_PATTERN = (
@@ -1324,7 +1368,7 @@ def policy_reply(text: str, portfolio: pd.DataFrame) -> Optional[Reply]:
         body.append(txt)
         table = tbl if tbl is not None else table
     sections = " and ".join(e["section"] for e in parts)
-    answer = "\n\n".join(body) + f"\n\n_Source: {POLICY_LABEL}, {sections}. Original in Greek; answered in English._"
+    answer = "\n\n".join(body) + f"\n\n_Source: {POLICY_LABEL}, {sections}. Original in Greek._"
 
     related = [e["title"] for s, e in scored if e not in parts and s >= 2][:3]
     if related:
@@ -1348,8 +1392,8 @@ def generate_reply(user_message: str, portfolio: pd.DataFrame) -> Reply:
     if re.search(r"\b(hi|hello|hey|good morning|good afternoon)\b", text) or "help" in text \
             or "what can you do" in text:
         return Reply(
-            "I can answer questions about the Noval Properties portfolio:\n\n"
-            "- **List** properties – “Provide a list of properties of Noval Properties”\n"
+            "I can answer questions about the Noval Property portfolio:\n\n"
+            "- **List** properties – “Provide a list of properties of Noval Property”\n"
             "- **Filter** by type, country, city, region or status – “Show offices in Athens”\n"
             "- **Rank** – “Rank the properties in decreasing area”, “Top 5 buildings by GLA”\n"
             "- **Superlatives** – “Which is the largest building?”, “Which country has the most buildings?”\n"
@@ -1396,6 +1440,10 @@ def generate_reply(user_message: str, portfolio: pd.DataFrame) -> Reply:
             next((d for d in ["type", "country", "city", "status", "region"] if d in scoped), None),
         )
         if dim:
+            if re.search(r"\bvalue|worth|valuation", text) and not (
+                    "value_eur" in scoped and scoped["value_eur"].notna().any()):
+                return Reply("The dataset has no building-level value figures to chart. Try **GLA** or the "
+                             "number of buildings by " + dim + ", or ask about the company's financial results.")
             use_value = "value" in text and "value_eur" in scoped
             use_area = bool(re.search(r"area|sqm|gla", text)) and "area_sqm" in scoped
             if use_value:
@@ -1410,6 +1458,8 @@ def generate_reply(user_message: str, portfolio: pd.DataFrame) -> Reply:
                 table=series.rename(label).reset_index().rename(columns={dim: COLUMN_LABELS.get(dim, dim)}),
                 chart=series,
                 chart_title=f"{label} by {dim}",
+                chart_unit="eur" if use_value else ("sqm" if use_area else "count"),
+                chart_source=PORTFOLIO_SOURCE,
             )
 
     # 4. Aggregates
@@ -1429,7 +1479,8 @@ def generate_reply(user_message: str, portfolio: pd.DataFrame) -> Reply:
         reply = Reply(f"## Portfolio overview{scope}\n\n{metrics_text(m)}")
         if "type" in scoped and not scoped.empty:
             reply.chart = scoped.groupby("type").size().sort_values(ascending=False)
-            reply.chart_title = "Properties by type"
+            reply.chart_title = "Buildings by type"
+            reply.chart_unit, reply.chart_source = "count", PORTFOLIO_SOURCE
         return reply
 
     # 6. Listing (explicit, or any filter was named)
@@ -1438,7 +1489,7 @@ def generate_reply(user_message: str, portfolio: pd.DataFrame) -> Reply:
             return Reply(f"No buildings match that filter{scope}.")
         return Reply(
             (f"Here is the **1 building** " if len(scoped) == 1 else f"Here are the **{len(scoped)} buildings** ")
-            + f"in the Noval Properties portfolio{scope}:",
+            + f"in the Noval Property portfolio{scope}:",
             table=list_table(scoped),
         )
 
@@ -1470,13 +1521,140 @@ def render_table(df: pd.DataFrame) -> None:
     st.dataframe(df, hide_index=True, use_container_width=True, column_config=config)
 
 
+# McKinsey-style chart palette: deep navy + electric blue, muted greys, no chart junk
+CHART_NAVY, CHART_BLUE, CHART_GREY = "#051C2C", "#2251FF", "#5A6872"
+CHART_FONT = "Inter, 'Helvetica Neue', Arial, sans-serif"
+_YEAR_PALETTE = ["#C3CDD9", "#8196AD", CHART_NAVY, CHART_BLUE]   # older -> newest
+
+
+def _palette(n: int) -> list[str]:
+    return [_YEAR_PALETTE[0]] * (n - 4) + _YEAR_PALETTE if n > 4 else _YEAR_PALETTE[-n:]
+
+
+def chart_label(unit: str, v) -> str:
+    if v is None or pd.isna(v):
+        return ""
+    if unit == "eur":
+        return fin_fmt("eur", v)
+    if unit == "eur_exact":
+        return f"€{v:,.0f}"
+    if unit == "eps":
+        return f"€{v:.2f}"
+    if unit == "pct":
+        return f"{v:.1f}%"
+    if unit == "x":
+        return f"{v:.2f}x"
+    if unit == "year":
+        return f"{v:.0f}"
+    return f"{v:,.0f}"
+
+
+def build_bar_spec(chart, unit: str = "") -> tuple[dict, bool]:
+    """Vega-Lite spec for a thin-bar, direct-labelled chart in a consulting style.
+
+    Returns (spec, compact) – compact=True for short vertical charts (shown at ~60% width on desktop).
+    """
+    frame = chart.to_frame("Value") if isinstance(chart, pd.Series) else chart.copy()
+    cats = [str(i) for i in frame.index]
+    series = [str(c) for c in frame.columns]
+    grouped = len(series) > 1
+    rows = []
+    for cat, (_, r) in zip(cats, frame.iterrows()):
+        for col, name in zip(frame.columns, series):
+            v = r[col]
+            rows.append({"category": cat, "series": name,
+                         "value": None if v is None or pd.isna(v) else float(v),
+                         "label": chart_label(unit, v)})
+
+    is_years = all(re.fullmatch(r"20\d\d", c) for c in cats)
+    horizontal = not (len(cats) <= 6 and max(len(c) for c in cats) <= 14)
+
+    axis_common = {"title": None, "ticks": False, "labelFont": CHART_FONT, "labelFontSize": 12,
+                   "labelColor": CHART_GREY, "domain": True, "domainColor": CHART_NAVY, "domainWidth": 1}
+    cat_axis = dict(axis_common, labelPadding=8, **({"labelLimit": 260} if horizontal else {"labelAngle": 0}))
+    cat_enc = {"field": "category", "type": "nominal", "sort": None, "axis": cat_axis}
+    val_enc = {"field": "value", "type": "quantitative", "axis": None, "scale": {"zero": True, "nice": False}}
+
+    if grouped:
+        color = {"field": "series", "type": "nominal", "sort": None,
+                 "scale": {"domain": series, "range": _palette(len(series))},
+                 "legend": {"orient": "top", "title": None, "direction": "horizontal", "symbolType": "square",
+                            "labelFont": CHART_FONT, "labelFontSize": 12, "labelColor": CHART_GREY, "offset": 6}}
+    else:
+        if is_years:
+            colors = _palette(len(cats))
+        else:
+            colors = [CHART_BLUE] + [CHART_NAVY] * (len(cats) - 1)   # highlight the leader
+        color = {"field": "category", "type": "nominal", "sort": None,
+                 "scale": {"domain": cats, "range": colors}, "legend": None}
+
+    if horizontal:
+        pos = {"y": cat_enc, "x": val_enc}
+        offset = {"yOffset": {"field": "series"}} if grouped else {}
+        bar_size = 11 if grouped else 16
+        height = max(80, int(len(cats) * ((len(series) * 13 + 16) if grouped else 28)))
+        padding = {"left": 4, "right": 64, "top": 28 if grouped else 6, "bottom": 4}
+    else:
+        pos = {"x": cat_enc, "y": val_enc}
+        offset = {"xOffset": {"field": "series"}} if grouped else {}
+        bar_size = 26 if grouped else 36
+        height = 260
+        padding = {"left": 4, "right": 8, "top": 40 if grouped else 24, "bottom": 4}
+
+    tooltip = ([{"field": "category", "title": " "}]
+               + ([{"field": "series", "title": "Series"}] if grouped else [])
+               + [{"field": "label", "title": "Value"}])
+    bar = {"mark": {"type": "bar", "size": bar_size, "cornerRadius": 0},
+           "encoding": {**pos, **offset, "color": color, "tooltip": tooltip}}
+
+    def text_layer(positive: bool) -> dict:
+        mark = {"type": "text", "font": CHART_FONT, "fontSize": 12, "fontWeight": 600, "color": CHART_NAVY}
+        if horizontal:
+            mark.update({"align": "left" if positive else "right", "dx": 6 if positive else -6})
+        else:
+            mark.update({"baseline": "bottom" if positive else "top", "dy": -4 if positive else 4})
+        return {"transform": [{"filter": "datum.value >= 0" if positive else "datum.value < 0"}],
+                "mark": mark,
+                "encoding": {**pos, **offset, "text": {"field": "label", "type": "nominal"}}}
+
+    spec = {
+        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+        "background": "transparent",
+        "data": {"values": rows},
+        "transform": [{"filter": "datum.value !== null"}],
+        "width": "container",
+        "height": height,
+        "padding": padding,
+        "autosize": {"type": "fit", "contains": "padding"},
+        "layer": [bar, text_layer(True), text_layer(False)],
+        "config": {"view": {"stroke": None}, "font": CHART_FONT},
+    }
+    return spec, (not horizontal and len(cats) <= 4)
+
+
+def render_chart(message: dict) -> None:
+    chart, unit = message["chart"], message.get("chart_unit", "")
+    title, source = message.get("chart_title", ""), message.get("chart_source", "")
+    if title:
+        st.markdown(f'<div class="chart-title">{escape(title)}</div><div class="chart-rule"></div>',
+                    unsafe_allow_html=True)
+    try:
+        spec, compact = build_bar_spec(chart, unit)
+    except Exception:  # noqa: BLE001 - never lose the answer because of a chart problem
+        st.bar_chart(chart, color=CHART_BLUE)
+    else:
+        holder = st.columns([3, 2])[0] if compact else st.container()
+        with holder:
+            st.vega_lite_chart(spec=spec, use_container_width=True, theme=None)
+    if source:
+        st.markdown(f'<div class="chart-source">Source: {escape(source)}</div>', unsafe_allow_html=True)
+
+
 def render_message(message: dict) -> None:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         if message.get("chart") is not None:
-            if message.get("chart_title"):
-                st.caption(message["chart_title"])
-            st.bar_chart(message["chart"], color="#2251FF")
+            render_chart(message)
         if message.get("table") is not None:
             render_table(message["table"])
 
@@ -1485,9 +1663,9 @@ def render_message(message: dict) -> None:
 # Session state
 # ------------------------------
 WELCOME = (
-    "Welcome to the **Noval Properties Advisor**.\n\n"
-    "Ask about the portfolio, for example: “Provide a list of properties of Noval Properties”, "
-    "or about the investment policy, for example: “What are the investment criteria?”. Answers are in English."
+    "Welcome to the **Noval Property Advisor**.\n\n"
+    "Ask about the portfolio, for example: “Provide a list of properties of Noval Property”, "
+    "or about the investment policy, for example: “What are the investment criteria?”."
 )
 
 if "messages" not in st.session_state:
@@ -1499,7 +1677,7 @@ if "pending_prompt" not in st.session_state:
 # Sidebar
 # ------------------------------
 with st.sidebar:
-    st.markdown("### Noval Properties Advisor")
+    st.markdown("### Noval Property Advisor")
     st.caption("Portfolio Q&A for the Viohalco digital transformation office.")
 
     st.markdown("#### Conversation")
@@ -1511,7 +1689,7 @@ with st.sidebar:
 
     st.markdown("#### Suggested prompts")
     for suggestion in [
-        "Provide a list of properties of Noval Properties",
+        "Provide a list of properties of Noval Property",
         "Give me a portfolio overview",
         "Rank the properties in decreasing area",
         "Compare 2025 vs 2024 financial reports",
@@ -1531,7 +1709,7 @@ portfolio = load_portfolio()
 
 with st.sidebar:
     st.caption(f"Data: {len(portfolio)} Noval buildings (embedded dataset).")
-    st.caption(f"Policy: {POLICY_LABEL}. Greek original, English answers.")
+    st.caption(f"Policy: {POLICY_LABEL}. Greek original.")
     st.caption(f"Financials: {FIN_LABEL}.")
 
 # ------------------------------
@@ -1540,12 +1718,12 @@ with st.sidebar:
 st.markdown(
     """
     <div class="brand-bar">
-      <div class="brand-name">Noval Properties Advisor</div>
+      <div class="brand-name">Noval Property Advisor</div>
       <div class="brand-tag">Viohalco · Real estate intelligence</div>
     </div>
     <div class="hero">
       <div class="hero-eyebrow">Portfolio intelligence</div>
-      <div class="hero-title">Ask anything about the Noval Properties portfolio</div>
+      <div class="hero-title">Ask anything about the Noval Property portfolio</div>
       <div class="hero-subtitle">
         Explore portfolio holdings, review financial performance, and consult the investment policy through a single, intuitive interface
       </div>
@@ -1628,6 +1806,8 @@ if user_prompt:
             "table": reply.table,
             "chart": reply.chart,
             "chart_title": reply.chart_title,
+            "chart_unit": reply.chart_unit,
+            "chart_source": reply.chart_source,
         }
     )
     st.rerun()
